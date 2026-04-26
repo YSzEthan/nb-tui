@@ -9,37 +9,39 @@ CACHE_TMP="$CACHE.tmp"
 
 mkdir -p "$PROFILE_DIR"
 
-# ── primitive checks ─────────────────────────────────────────────
-is_active()    { systemctl is-active --quiet netbird; }
-is_connected() { grep -q "Management: Connected" "$CACHE" 2>/dev/null; }
-has_login()    { sudo -n jq -e '.PrivateKey | length > 0' "$ACTIVE" >/dev/null 2>&1; }
+# ── state checks — all read from cache (no sudo at menu-build time) ──
+is_active()    { grep -q "^service=active"    "$CACHE" 2>/dev/null; }
+has_login()    { grep -q "^login=yes"         "$CACHE" 2>/dev/null; }
+is_connected() { grep -q "^connected=yes"     "$CACHE" 2>/dev/null; }
+cached_ip()    { grep "^ip=" "$CACHE" 2>/dev/null | cut -d= -f2; }
+cached_mgmt()  { grep "^mgmt=" "$CACHE" 2>/dev/null | cut -d= -f2-; }
+cached_profile(){ grep "^profile=" "$CACHE" 2>/dev/null | cut -d= -f2-; }
 
-# ── data extraction ──────────────────────────────────────────────
+# ── data extraction (used by daemon with active sudo) ────────────
 mgmt_url() {
     local f=${1:-$ACTIVE} reader=jq
-    [[ $f == "$ACTIVE" ]] && reader="sudo -n jq"
+    [[ $f == "$ACTIVE" ]] && reader="sudo jq"
     $reader -r '.ManagementURL // "?"' "$f" 2>/dev/null || echo "?"
 }
 
 profile_fingerprint() {
     local f=$1 reader=jq
-    [[ $f == "$ACTIVE" ]] && reader="sudo -n jq"
+    [[ $f == "$ACTIVE" ]] && reader="sudo jq"
     $reader -r '"\(.ManagementURL // "")|\(.PrivateKey // "")|\(.SetupKey // "")"' "$f" 2>/dev/null \
         | sha256sum | awk '{print $1}'
 }
 
-current_profile() {
-    local active_fp; active_fp=$(profile_fingerprint "$ACTIVE")
+current_profile_live() {
+    local active_fp; active_fp=$(profile_fingerprint "$ACTIVE") || return
     [[ -n $active_fp ]] || return
     local f
     for f in "$PROFILE_DIR"/*.json; do
-        [[ -e $f ]] || continue
+        [[ -e $f && $(basename "$f") != .* ]] || continue
         [[ "$(profile_fingerprint "$f")" == "$active_fp" ]] && { basename "$f" .json; return; }
     done
 }
 
 # ── shared core operations ───────────────────────────────────────
-# Save current ACTIVE config to a named profile file
 save_profile_file() {
     local name=$1
     sudo cp "$ACTIVE" "$PROFILE_DIR/$name.json"
@@ -47,7 +49,6 @@ save_profile_file() {
     chmod 600 "$PROFILE_DIR/$name.json"
 }
 
-# Switch netbird to use a profile file (stop→install→start→up)
 apply_profile() {
     local src=$1
     sudo systemctl stop netbird
@@ -56,7 +57,6 @@ apply_profile() {
     sudo netbird up
 }
 
-# Move ACTIVE config to LAST_LOGOUT (stop first if connected)
 core_logout() {
     sudo netbird down 2>/dev/null || true
     sudo mv "$ACTIVE" "$LAST_LOGOUT"
@@ -64,44 +64,66 @@ core_logout() {
     chmod 600 "$LAST_LOGOUT"
 }
 
-# fzf wrapper: show labels (col 2+), return id (col 1)
 fzf_pick_id() { fzf --delimiter='|' --with-nth=2.. "$@" | cut -d'|' -f1; }
 
-# ── status snapshot ──────────────────────────────────────────────
-render_status() {
-    local cur mgmt nb_status connected ip
+# ── daemon: write cache (machine flags + human display) ──────────
+render_cache() {
+    local nb_out nb_detail svc login connected ip mgmt profile
 
-    cur=$(current_profile || true)
-    mgmt=$(mgmt_url)
+    svc=$(systemctl is-active netbird 2>/dev/null || echo "inactive")
+    login=$(sudo jq -e '.PrivateKey | length > 0' "$ACTIVE" >/dev/null 2>&1 && echo yes || echo no)
+    mgmt=$(sudo jq -r '.ManagementURL // "?"' "$ACTIVE" 2>/dev/null || echo "?")
 
-    # Single call — used for both connected check and peer list
-    nb_status=$(netbird status -d 2>/dev/null || true)
-    connected=$(echo "$nb_status" | grep -c "Management: Connected" || true)
-    ip=$(echo "$nb_status" | awk '/^NetBird IP/ {print $NF; exit}')
+    nb_out=$(netbird status 2>/dev/null || true)
+    nb_detail=$(netbird status -d 2>/dev/null || true)
 
-    echo "Profile:   ${cur:-(unsaved)}   ${mgmt}"
-    is_active  && echo "Service:   ● 開啟"   || echo "Service:   ○ 未開啟"
-    has_login  && echo "Login:     ● 已登入" || echo "Login:     ○ 未登入"
-    if (( connected > 0 )); then
-        echo "Connected: ● ${ip:-yes}"
-        echo "Management: Connected"
-    else
-        echo "Connected: ○ 未連線"
+    connected=no; ip=""
+    if echo "$nb_out" | grep -q "Management: Connected"; then
+        connected=yes
+        ip=$(echo "$nb_out" | awk '/^NetBird IP/{print $NF; exit}')
     fi
+
+    profile=$(current_profile_live || true)
+
+    # Machine-readable flags (read by is_active / has_login / is_connected)
+    cat <<EOF
+service=$svc
+login=$login
+connected=$connected
+ip=$ip
+mgmt=$mgmt
+profile=${profile:-(unsaved)}
+---
+EOF
+
+    # Human-readable display (cat'd by fzf preview)
+    printf 'Profile:   %-20s %s\n' "${profile:-(unsaved)}" "$mgmt"
+    [[ $svc == active ]]    && echo "Service:   ● 開啟"   || echo "Service:   ○ 未開啟"
+    [[ $login == yes ]]     && echo "Login:     ● 已登入" || echo "Login:     ○ 未登入"
+    [[ $connected == yes ]] && echo "Connected: ● $ip"    || echo "Connected: ○ 未連線"
     echo
-    echo "Peers:"
-    echo "$nb_status" \
-        | awk '/Peers detail:/{flag=1;next} flag && NF' \
-        | head -20 \
-        | sed 's/^/  /'
+
+    # Peers — only name / IP / status (no raw detail)
+    local peers_summary
+    peers_summary=$(echo "$nb_detail" | awk '
+        /^  [A-Za-z]/ {
+            name=$0; gsub(/^ +/,"",name); gsub(/:$/,"",name); gsub(/\.netbird\.cloud$/,"",name)
+        }
+        /NetBird IP:/ { ip=$NF }
+        /^  Status:/  { printf "  %-22s %-18s %s\n", name, ip, $2 }
+    ')
+    if [[ -n $peers_summary ]]; then
+        echo "Peers:"
+        echo "$peers_summary"
+    else
+        echo "Peers: (none)"
+    fi
 }
 
-# ── background status daemon ─────────────────────────────────────
 status_daemon() {
     while :; do
-        # Refresh sudo ticket every cycle so sudo -n calls keep working
         sudo -v 2>/dev/null || true
-        render_status > "$CACHE_TMP" 2>/dev/null && mv -f "$CACHE_TMP" "$CACHE"
+        render_cache > "$CACHE_TMP" 2>/dev/null && mv -f "$CACHE_TMP" "$CACHE"
         sleep 2
     done
 }
@@ -111,25 +133,30 @@ start_daemon() {
     status_daemon &
     DAEMON_PID=$!
     trap 'kill $DAEMON_PID 2>/dev/null; rm -f "$CACHE" "$CACHE_TMP"' EXIT INT TERM
-    # Wait for first cache write before entering fzf
     local i=0
-    until [[ -s $CACHE ]] || (( i++ > 10 )); do sleep 0.2; done
+    until [[ -s $CACHE ]] || (( i++ > 15 )); do sleep 0.2; done
 }
 
-# ── state-aware menu (id|label format) ──────────────────────────
+# ── state-aware menu (id|label) ──────────────────────────────────
 build_menu() {
     if ! is_active; then
-        printf '%s\n' "start_svc|Start service" "switch|Switch profile..." "quit|Quit"
+        printf '%s\n' "start_svc|▶ Start service" "switch|⇄ Switch profile..." "quit|✕ Quit"
         return
     fi
     if ! has_login; then
-        printf '%s\n' "login|Login (OAuth)" "switch|Switch profile..." "stop_svc|Stop service" "quit|Quit"
+        printf '%s\n' "login|⇥ Login (OAuth)" "switch|⇄ Switch profile..." "stop_svc|■ Stop service" "quit|✕ Quit"
         return
     fi
-    is_connected && echo "disconnect|Disconnect" || echo "connect|Connect"
-    echo "switch|Switch profile..."
-    is_connected && echo "peers|Peers..."
-    printf '%s\n' "save|Save as..." "logout|Logout" "stop_svc|Stop service" "quit|Quit"
+    is_connected && echo "disconnect|⏹ Disconnect" || echo "connect|▶ Connect"
+    echo "switch|⇄ Switch profile..."
+    is_connected && echo "peers|⊞ Peers..."
+    printf '%s\n' "save|⊕ Save as..." "logout|⇤ Logout" "stop_svc|■ Stop service" "quit|✕ Quit"
+}
+
+# ── nb status (CLI) ──────────────────────────────────────────────
+render_status() {
+    grep -A 999 '^---$' "$CACHE" 2>/dev/null | tail -n +2 \
+        || { echo "Cache not ready — run 'nb' (TUI) first or wait 2s"; return 1; }
 }
 
 # ── interactive sub-UIs ──────────────────────────────────────────
@@ -137,39 +164,38 @@ switch_profile_ui() {
     local profiles
     mapfile -t profiles < <(find "$PROFILE_DIR" -maxdepth 1 -name '*.json' ! -name '.*' 2>/dev/null)
     if (( ${#profiles[@]} == 0 )); then
-        printf '\nNo profiles yet — use "Save as..." first.\n' >&2
-        sleep 1.5
-        return
+        printf '\nNo profiles yet — use "Save as..." first.\n'; sleep 1.5; return
     fi
-
     local lines=() f name url
     for f in "${profiles[@]}"; do
         name=$(basename "$f" .json)
         url=$(mgmt_url "$f")
-        lines+=("$(printf '%s|%-20s %s' "$name" "$name" "$url")")
+        lines+=("$(printf '%s|%-20s  %s' "$name" "$name" "$url")")
     done
-
-    local name
-    name=$(printf '%s\n' "${lines[@]}" \
+    local pick
+    pick=$(printf '%s\n' "${lines[@]}" \
         | fzf_pick_id --reverse \
-              --header="Switch profile (Enter=apply, Esc=cancel)" \
+              --header="Switch profile  (Enter=apply  Esc=cancel)" \
               --preview="jq -r '\"Mgmt: \\(.ManagementURL // \"?\")\"' \"$PROFILE_DIR/{1}.json\" 2>/dev/null" \
               --preview-window=right:40%) || return
-    [[ -n $name && -f "$PROFILE_DIR/$name.json" ]] || return
-
-    if [[ "$(current_profile)" == "$name" ]]; then
-        printf '\nAlready on %s\n' "$name" >&2; sleep 1; return
+    [[ -n $pick && -f "$PROFILE_DIR/$pick.json" ]] || return
+    if [[ "$(cached_profile)" == "$pick" ]]; then
+        printf '\nAlready on %s\n' "$pick"; sleep 1; return
     fi
-    apply_profile "$PROFILE_DIR/$name.json"
+    apply_profile "$PROFILE_DIR/$pick.json"
 }
 
 peers_ui() {
     local peer name
     peer=$(netbird status -d 2>/dev/null \
-        | awk '/Peers detail:/{flag=1;next} flag && NF' \
-        | fzf --reverse \
-              --header="Peers — Enter to ssh, Esc to back" \
-              --preview-window=hidden) || return
+        | awk '
+            /^  [A-Za-z]/ {
+                name=$0; gsub(/^ +/,"",name); gsub(/:$/,"",name); gsub(/\.netbird\.cloud$/,"",name)
+            }
+            /NetBird IP:/ { ip=$NF }
+            /^  Status:/  { printf "%-22s %-18s %s\n", name, ip, $2 }
+        ' \
+        | fzf --reverse --header="Peers  (Enter=ssh  Esc=back)") || return
     [[ -n $peer ]] || return
     name=$(awk '{print $1}' <<< "$peer")
     [[ -n $name ]] || return
@@ -179,7 +205,7 @@ peers_ui() {
 }
 
 save_ui() {
-    has_login || { printf '\nNot logged in.\n' >&2; sleep 1; return; }
+    has_login || { printf '\nNot logged in.\n'; sleep 1; return; }
     local name
     read -rp "Profile name: " name
     [[ -n $name ]] || return
@@ -194,7 +220,7 @@ save_ui() {
 
 logout_ui() {
     local yn
-    yn=$(printf 'no|No, cancel\nyes|Yes, logout (move credentials to .last-logout.json)\n' \
+    yn=$(printf 'no|No, cancel\nyes|Yes — move credentials to .last-logout.json\n' \
         | fzf_pick_id --reverse --header="Confirm logout?") || return
     [[ $yn == yes ]] || return
     core_logout 2>/dev/null || true
