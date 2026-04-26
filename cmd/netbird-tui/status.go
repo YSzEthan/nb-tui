@@ -30,7 +30,7 @@ func newStatusCmd() *cobra.Command {
 				conn = "● " + s.IP
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Service:   %s\nLogin:     %s\nConnected: %s\nMgmt:      %s\n",
-				svcStatus, login, conn, s.ManagementURL)
+				svcStatus, login, conn, s.ManagementURL())
 			return nil
 		},
 	}

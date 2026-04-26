@@ -2,65 +2,61 @@
 // for managing sudo credentials. All calls shell out to the netbird binary.
 package netbird
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "encoding/json"
 
-// ManagementURL handles both string and {Scheme,Host,Path} shapes from NetBird 0.27+.
-type ManagementURL struct {
-	Value string
+// management mirrors the "management" object in `netbird status --json`.
+type management struct {
+	URL string `json:"url"`
 }
 
-func (m *ManagementURL) UnmarshalJSON(data []byte) error {
-	// Try string first (legacy)
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		m.Value = s
-		return nil
-	}
-	// Try object shape: {Scheme, Host, Path}
-	var obj struct {
-		Scheme string `json:"Scheme"`
-		Host   string `json:"Host"`
-		Path   string `json:"Path"`
-	}
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return fmt.Errorf("managementURL: unexpected shape: %w", err)
-	}
-	m.Value = obj.Scheme + "://" + obj.Host + obj.Path
-	return nil
+// peersList mirrors the "peers" object: {total, connected, details:[...]}.
+type peersList struct {
+	Details []Peer `json:"details"`
 }
-
-func (m ManagementURL) MarshalJSON() ([]byte, error) {
-	return json.Marshal(m.Value)
-}
-
-func (m ManagementURL) String() string { return m.Value }
 
 // Status is the parsed output of `netbird status --json`.
 type Status struct {
-	DaemonStatus  string        `json:"daemonStatus"`
-	ManagementURL ManagementURL `json:"managementState"`
-	IP            string        `json:"netbirdIp"`
-	PrivateKey    string        `json:"privateKey"`
-	SetupKey      string        `json:"setupKey"`
-	Peers         []Peer        `json:"peers"`
+	DaemonStatus string     `json:"daemonStatus"`
+	Management   management `json:"management"`
+	IP           string     `json:"netbirdIp"`
+	PublicKey    string     `json:"publicKey"`
+	PeersData    peersList  `json:"peers"`
 }
 
+// ManagementURL returns the management server URL for display.
+func (s *Status) ManagementURL() string { return s.Management.URL }
+
+// Peers returns the list of peers from the parsed status JSON.
+func (s *Status) Peers() []Peer { return s.PeersData.Details }
+
 // Peer represents a single peer from the status JSON.
+// Connected is derived from the "status" string field ("Connected" → true).
 type Peer struct {
-	Name      string `json:"fqdn"`
-	IP        string `json:"netbirdIp"`
-	Connected bool   `json:"connected"`
+	Name      string
+	IP        string
+	Connected bool
+}
+
+func (p *Peer) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		FQDN   string `json:"fqdn"`
+		IP     string `json:"netbirdIp"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.Name = raw.FQDN
+	p.IP = raw.IP
+	p.Connected = raw.Status == "Connected"
+	return nil
 }
 
 // IsLoggedIn returns true when the daemon is reachable and not in NeedsLogin/LoginFailed state.
 func (s *Status) IsLoggedIn() bool {
 	switch s.DaemonStatus {
 	case "":
-		// Daemon unreachable — fallback to PrivateKey presence
-		return len(s.PrivateKey) > 0
+		return len(s.PublicKey) > 0
 	case "NeedsLogin", "LoginFailed":
 		return false
 	default:

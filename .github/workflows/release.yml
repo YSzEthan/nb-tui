@@ -12,9 +12,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - { goos: linux,  goarch: amd64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
+          - { goos: linux,  goarch: amd64, label: linux }
+          - { goos: darwin, goarch: arm64, label: macOS }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,13 +26,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION=${GITHUB_REF_NAME}
-          OUT=NetBird-TUI-${{ matrix.goos }}-${{ matrix.goarch }}
-          go build -ldflags "-X main.version=${VERSION}" -o ${OUT} ./cmd/netbird-tui
-          tar -czf ${OUT}.tar.gz ${OUT}
+          go build -ldflags "-X main.version=${VERSION}" -o NetBird-TUI-${{ matrix.label }} ./cmd/netbird-tui
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.goos }}-${{ matrix.goarch }}
-          path: 'NetBird-TUI-*.tar.gz'
+          name: ${{ matrix.label }}
+          path: 'NetBird-TUI-${{ matrix.label }}'
 
   release:
     needs: build
@@ -45,5 +42,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          name: NetBird-TUI ${{ github.ref_name }}
+          files: dist/NetBird-TUI-*
           generate_release_notes: true

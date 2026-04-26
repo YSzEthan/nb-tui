@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// PeersFromStatus extracts peers already parsed from Status JSON — preferred path.
-// Falls back to parsePeersText if the slice is empty (older netbird versions).
+// PeersFromStatus extracts peers from the parsed Status JSON.
+// Falls back to parsePeersText for older netbird versions that don't include peer details.
 func PeersFromStatus(s *Status) []Peer {
-	if len(s.Peers) > 0 {
-		return s.Peers
+	if p := s.Peers(); len(p) > 0 {
+		return p
 	}
 	return parsePeersText()
 }

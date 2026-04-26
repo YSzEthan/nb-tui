@@ -410,7 +410,7 @@ func (m model) renderStatus() string {
 		"Service:  " + svcLine,
 		"Login:    " + loginLine,
 		"Conn:     " + connLine,
-		"Mgmt:     " + styleHelp.Render(s.ManagementURL.String()),
+		"Mgmt:     " + styleHelp.Render(s.ManagementURL()),
 	}
 
 	if len(m.peers) > 0 && s.IsConnected() {
