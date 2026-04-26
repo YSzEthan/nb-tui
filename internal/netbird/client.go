@@ -36,9 +36,19 @@ func Down() error {
 	return RunSudo("netbird", "down")
 }
 
-// SSHCmd returns the exec.Cmd for `sudo netbird ssh <peer>` — caller runs it interactively.
+// EnableSSH runs `sudo netbird up --allow-server-ssh` to start the local SSH server.
+func EnableSSH() error {
+	return RunSudo("netbird", "up", "--allow-server-ssh")
+}
+
+// DisableSSH runs `sudo netbird up` (without --allow-server-ssh) to stop the local SSH server.
+func DisableSSH() error {
+	return RunSudo("netbird", "up")
+}
+
+// SSHCmd returns the exec.Cmd for `netbird ssh <peer>` — caller runs it interactively.
 func SSHCmd(peer string) *exec.Cmd {
-	return exec.Command("sudo", "netbird", "ssh", peer)
+	return exec.Command("netbird", "ssh", peer)
 }
 
 // --- sudo helpers ---

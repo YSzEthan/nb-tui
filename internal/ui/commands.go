@@ -162,3 +162,22 @@ func startKeepaliveCmd(ctx context.Context, interval time.Duration) tea.Cmd {
 func sudoRefreshProc() *exec.Cmd {
 	return exec.Command("sudo", "-v")
 }
+
+func toggleSSHCmd(enable bool) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		if enable {
+			err = netbird.EnableSSH()
+		} else {
+			err = netbird.DisableSSH()
+		}
+		if err != nil {
+			return errMsg{err}
+		}
+		label := "SSH 伺服器已關閉"
+		if enable {
+			label = "SSH 伺服器已開啟"
+		}
+		return actionDoneMsg{label}
+	}
+}

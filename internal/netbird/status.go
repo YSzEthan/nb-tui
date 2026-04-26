@@ -14,6 +14,11 @@ type peersList struct {
 	Details []Peer `json:"details"`
 }
 
+// sshServer mirrors the "sshServer" object in `netbird status --json`.
+type sshServer struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Status is the parsed output of `netbird status --json`.
 type Status struct {
 	DaemonStatus string     `json:"daemonStatus"`
@@ -21,6 +26,7 @@ type Status struct {
 	IP           string     `json:"netbirdIp"`
 	PublicKey    string     `json:"publicKey"`
 	PeersData    peersList  `json:"peers"`
+	SSHServer    sshServer  `json:"sshServer"`
 }
 
 // ManagementURL returns the management server URL for display.
@@ -28,6 +34,9 @@ func (s *Status) ManagementURL() string { return s.Management.URL }
 
 // Peers returns the list of peers from the parsed status JSON.
 func (s *Status) Peers() []Peer { return s.PeersData.Details }
+
+// SSHEnabled returns true when the local NetBird SSH server is running.
+func (s *Status) SSHEnabled() bool { return s.SSHServer.Enabled }
 
 // Peer represents a single peer from the status JSON.
 // Connected is derived from the "status" string field ("Connected" → true).

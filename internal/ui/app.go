@@ -286,6 +286,10 @@ func (m *model) handleMenuAction(id string) (tea.Model, tea.Cmd) {
 			m.updatePeerList(netbird.PeersFromStatus(m.lastStatus))
 		}
 		return m, nil
+	case "ssh_on":
+		return m, toggleSSHCmd(true)
+	case "ssh_off":
+		return m, toggleSSHCmd(false)
 	case "save":
 		m.state = viewSave
 		m.input.Focus()
@@ -316,6 +320,11 @@ func (m *model) rebuildMenu() {
 			} else {
 				items = append(items, menuItem{"disconnect", "⏹ 斷線"})
 				items = append(items, menuItem{"peers", "⊞ Peers..."})
+				if m.lastStatus.SSHEnabled() {
+					items = append(items, menuItem{"ssh_off", "⛔ 關閉 SSH 伺服器"})
+				} else {
+					items = append(items, menuItem{"ssh_on", "⌨ 開啟 SSH 伺服器"})
+				}
 			}
 		}
 	}
@@ -336,7 +345,7 @@ func (m *model) updatePeerList(peers []netbird.Peer) {
 		if p.Connected {
 			status = "●"
 		}
-		items[i] = menuItem{id: p.Name, label: fmt.Sprintf("%s %s  %s", status, p.Name, p.IP)}
+		items[i] = menuItem{id: p.IP, label: fmt.Sprintf("%s %s  %s", status, p.Name, p.IP)}
 	}
 	m.peerList.SetItems(items)
 }
@@ -411,6 +420,12 @@ func (m model) renderStatus() string {
 		"Login:    " + loginLine,
 		"Conn:     " + connLine,
 		"Mgmt:     " + styleHelp.Render(s.ManagementURL()),
+		"SSH:      " + func() string {
+			if s.SSHEnabled() {
+				return styleActive.Render("● 開啟")
+			}
+			return styleInactive.Render("○ 關閉")
+		}(),
 	}
 
 	if len(m.peers) > 0 && s.IsConnected() {
