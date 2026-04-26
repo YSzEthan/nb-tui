@@ -1,0 +1,12 @@
+# binary
+NetBird-TUI
+
+# NetBird profile files contain private keys — never commit
+*.json
+
+# Go build cache
+/vendor/
+
+# Claude
+.claude
+CLAUDE.md
