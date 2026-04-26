@@ -287,8 +287,16 @@ func (m *model) handleMenuAction(id string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ssh_on":
+		if m.lastStatus != nil {
+			m.lastStatus.SSHServer.Enabled = true
+		}
+		m.rebuildMenu()
 		return m, toggleSSHCmd(true)
 	case "ssh_off":
+		if m.lastStatus != nil {
+			m.lastStatus.SSHServer.Enabled = false
+		}
+		m.rebuildMenu()
 		return m, toggleSSHCmd(false)
 	case "save":
 		m.state = viewSave

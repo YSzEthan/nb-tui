@@ -1,0 +1,32 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gocritic
+    - gosec
+    - bodyclose
+    - nilerr
+    - ineffassign
+    - unused
+    - gofmt
+    - goimports
+
+linters-settings:
+  gosec:
+    excludes:
+      - G204  # subprocess launched with variable — intentional (netbird CLI invocations)
+  revive:
+    rules:
+      - name: exported
+        disabled: false
+
+issues:
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - errcheck
