@@ -2,8 +2,46 @@
 # nb-helpers.sh — shared helpers for the `nb` NetBird control tool
 
 PROFILE_DIR="$HOME/.config/netbird-profiles"
-ACTIVE="/etc/netbird/config.json"
 LAST_LOGOUT="$PROFILE_DIR/.last-logout.json"
+
+# ── platform detection ───────────────────────────────────────────
+OS="$(uname -s)"   # Linux | Darwin
+
+detect_active_config() {
+    local candidates=("/var/lib/netbird/default.json" "/etc/netbird/config.json")
+    for f in "${candidates[@]}"; do
+        sudo test -f "$f" 2>/dev/null && { echo "$f"; return 0; }
+    done
+    # fallback: parse --config from service definition
+    if [[ $OS == Linux ]] && command -v systemctl >/dev/null 2>&1; then
+        systemctl cat netbird 2>/dev/null \
+            | grep -oE -- '--config[= ][^ "]+' | head -1 | awk '{print $NF}' | tr -d '='
+    else
+        echo "/var/lib/netbird/default.json"
+    fi
+}
+ACTIVE="$(detect_active_config)"
+
+svc_is_active() {
+    case "$OS" in
+        Linux)  systemctl is-active netbird 2>/dev/null || echo inactive ;;
+        Darwin) launchctl print system/io.netbird.client 2>/dev/null \
+                    | grep -q 'state = running' && echo active || echo inactive ;;
+    esac
+}
+svc_start() {
+    case "$OS" in
+        Linux)  sudo systemctl start netbird ;;
+        Darwin) sudo launchctl bootstrap system \
+                    /Library/LaunchDaemons/io.netbird.client.plist ;;
+    esac
+}
+svc_stop() {
+    case "$OS" in
+        Linux)  sudo systemctl stop netbird ;;
+        Darwin) sudo launchctl bootout system/io.netbird.client 2>/dev/null || true ;;
+    esac
+}
 CACHE="/tmp/nb-status-${USER}.cache"
 CACHE_TMP="$CACHE.tmp"
 
@@ -21,14 +59,23 @@ cached_profile(){ grep "^profile=" "$CACHE" 2>/dev/null | cut -d= -f2-; }
 mgmt_url() {
     local f=${1:-$ACTIVE} reader=jq
     [[ $f == "$ACTIVE" ]] && reader="sudo jq"
-    $reader -r '.ManagementURL // "?"' "$f" 2>/dev/null || echo "?"
+    $reader -r '
+      if (.ManagementURL | type) == "object"
+      then "\(.ManagementURL.Scheme)://\(.ManagementURL.Host)\(.ManagementURL.Path // "")"
+      else (.ManagementURL // "?")
+      end
+    ' "$f" 2>/dev/null || echo "?"
 }
 
 profile_fingerprint() {
     local f=$1 reader=jq
     [[ $f == "$ACTIVE" ]] && reader="sudo jq"
-    $reader -r '"\(.ManagementURL // "")|\(.PrivateKey // "")|\(.SetupKey // "")"' "$f" 2>/dev/null \
-        | sha256sum | awk '{print $1}'
+    $reader -r '
+      ( if (.ManagementURL | type) == "object"
+        then "\(.ManagementURL.Scheme)://\(.ManagementURL.Host)\(.ManagementURL.Path // "")"
+        else (.ManagementURL // "")
+        end ) + "|" + (.PrivateKey // "") + "|" + (.SetupKey // "")
+    ' "$f" 2>/dev/null | sha256sum | awk '{print $1}'
 }
 
 current_profile_live() {
@@ -51,9 +98,9 @@ save_profile_file() {
 
 apply_profile() {
     local src=$1
-    sudo systemctl stop netbird
+    svc_stop
     sudo install -m 600 -o root -g root "$src" "$ACTIVE"
-    sudo systemctl start netbird
+    svc_start
     sudo netbird up
 }
 
@@ -70,12 +117,29 @@ fzf_pick_id() { fzf --delimiter='|' --with-nth=2.. "$@" | cut -d'|' -f1; }
 render_cache() {
     local nb_out nb_detail svc login connected ip mgmt profile
 
-    svc=$(systemctl is-active netbird 2>/dev/null || echo "inactive")
-    login=$(sudo jq -e '.PrivateKey | length > 0' "$ACTIVE" >/dev/null 2>&1 && echo yes || echo no)
-    mgmt=$(sudo jq -r '.ManagementURL // "?"' "$ACTIVE" 2>/dev/null || echo "?")
+    svc=$(svc_is_active)
+    mgmt=$(mgmt_url "$ACTIVE")
 
     nb_out=$(netbird status 2>/dev/null || true)
     nb_detail=$(netbird status -d 2>/dev/null || true)
+    nb_json=$(netbird status --json 2>/dev/null || true)
+
+    # daemonStatus is the authoritative signal:
+    #   NeedsLogin → not logged in; Connected/Idle/Disconnected → logged in
+    local dstatus
+    dstatus=$(echo "$nb_json" | jq -r '.daemonStatus // ""' 2>/dev/null)
+    case "$dstatus" in
+        NeedsLogin|LoginFailed) login=no ;;
+        "")
+            # daemon unreachable — fall back to credential presence
+            if sudo jq -e '.PrivateKey | length > 0' "$ACTIVE" >/dev/null 2>&1; then
+                login=yes
+            else
+                login=no
+            fi
+            ;;
+        *) login=yes ;;
+    esac
 
     connected=no; ip=""
     if echo "$nb_out" | grep -q "Management: Connected"; then
@@ -106,11 +170,11 @@ EOF
     # Peers — only name / IP / status (no raw detail)
     local peers_summary
     peers_summary=$(echo "$nb_detail" | awk '
-        /^  [A-Za-z]/ {
+        /^ [A-Za-z]/ && /:$/ {
             name=$0; gsub(/^ +/,"",name); gsub(/:$/,"",name); gsub(/\.netbird\.cloud$/,"",name)
         }
-        /NetBird IP:/ { ip=$NF }
-        /^  Status:/  { printf "  %-22s %-18s %s\n", name, ip, $2 }
+        /^  NetBird IP:/ { ip=$NF }
+        /^  Status:/     { printf "  %-22s %-18s %s\n", name, ip, $2 }
     ')
     if [[ -n $peers_summary ]]; then
         echo "Peers:"
@@ -189,11 +253,11 @@ peers_ui() {
     local peer name
     peer=$(netbird status -d 2>/dev/null \
         | awk '
-            /^  [A-Za-z]/ {
+            /^ [A-Za-z]/ && /:$/ {
                 name=$0; gsub(/^ +/,"",name); gsub(/:$/,"",name); gsub(/\.netbird\.cloud$/,"",name)
             }
-            /NetBird IP:/ { ip=$NF }
-            /^  Status:/  { printf "%-22s %-18s %s\n", name, ip, $2 }
+            /^  NetBird IP:/ { ip=$NF }
+            /^  Status:/     { printf "%-22s %-18s %s\n", name, ip, $2 }
         ' \
         | fzf --reverse --header="Peers  (Enter=ssh  Esc=back)") || return
     [[ -n $peer ]] || return
@@ -228,9 +292,9 @@ logout_ui() {
 
 restore_last() {
     [[ -f $LAST_LOGOUT ]] || { echo "No .last-logout.json to restore." >&2; return 1; }
-    sudo systemctl stop netbird 2>/dev/null || true
+    svc_stop
     sudo install -m 600 -o root -g root "$LAST_LOGOUT" "$ACTIVE"
-    sudo systemctl start netbird
+    svc_start
     rm -f "$LAST_LOGOUT"
     echo "Restored last logout credentials."
 }

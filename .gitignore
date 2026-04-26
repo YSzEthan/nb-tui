@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# NetBird profile files — contain private keys, never commit
+*.json
+
+# Runtime cache
+/tmp/nb-status-*.cache
+
+CLAUDE.md

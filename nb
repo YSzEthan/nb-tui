@@ -2,6 +2,12 @@
 # nb — NetBird interactive control center + CLI
 set -euo pipefail
 
+case "$(uname -s)" in
+    MINGW*|CYGWIN*|MSYS*)
+        echo "nb-tui 只支援 Linux 與 macOS。Windows 使用者請用 NetBird 官方 GUI，或在 WSL2 中執行本工具。" >&2
+        exit 1 ;;
+esac
+
 HERE="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=/dev/null
 source "$HERE/nb-helpers.sh"
@@ -110,14 +116,17 @@ tui() {
         case ${choice:-quit} in
             connect|login)  sudo netbird up ;;
             disconnect)     sudo netbird down ;;
-            start_svc)      sudo systemctl start netbird ;;
-            stop_svc)       sudo systemctl stop netbird ;;
+            start_svc)      svc_start ;;
+            stop_svc)       svc_stop ;;
             switch)         switch_profile_ui ;;
             peers)          peers_ui ;;
             save)           save_ui ;;
             logout)         logout_ui ;;
             quit|"")        break ;;
         esac
+        # Force immediate cache refresh so next menu render shows correct state
+        sleep 1.5
+        render_cache > "$CACHE_TMP" 2>/dev/null && mv -f "$CACHE_TMP" "$CACHE" || true
     done
 }
 
@@ -136,8 +145,8 @@ case ${cmd:-} in
     rm)             cli_rm "$@" ;;
     up)             sudo netbird up ;;
     down)           sudo netbird down ;;
-    start)          sudo systemctl start netbird ;;
-    stop)           sudo systemctl stop netbird ;;
+    start)          svc_start ;;
+    stop)           svc_stop ;;
     logout)         cli_logout ;;
     restore-last)   restore_last ;;
     -h|--help|help) usage ;;
