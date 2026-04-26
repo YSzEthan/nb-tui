@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# nb — NetBird interactive control center + CLI
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=/dev/null
+source "$HERE/nb-helpers.sh"
+
+usage() {
+    cat <<'EOF'
+nb — NetBird control
+
+Interactive:
+  nb                       launch TUI
+
+Profile:
+  nb ls                    list profiles (★ = active)
+  nb current               print active profile name
+  nb save <name>           save current config as <name>
+  nb use [<name>]          switch profile (fzf if no name)
+  nb rename <old> <new>    rename profile
+  nb rm <name>             delete profile
+
+Connection:
+  nb status                print Service / Login / Connected snapshot
+  nb up                    netbird up    (login/connect)
+  nb down                  netbird down  (disconnect)
+  nb start                 systemctl start netbird
+  nb stop                  systemctl stop netbird
+  nb logout                move config to .last-logout.json
+  nb restore-last          restore .last-logout.json
+EOF
+}
+
+# ── CLI subcommands ──────────────────────────────────────────────
+cli_ls() {
+    local cur; cur=$(current_profile || true)
+    local any=0 f name url marker
+    for f in "$PROFILE_DIR"/*.json; do
+        [[ -e $f && $(basename "$f") != .* ]] || continue
+        any=1
+        name=$(basename "$f" .json)
+        url=$(mgmt_url "$f")
+        marker="  "; [[ $name == "$cur" ]] && marker="★ "
+        printf "%s%-20s %s\n" "$marker" "$name" "$url"
+    done
+    (( any )) || echo "(no profiles — run: nb save <name>)"
+    [[ -z $cur ]] && sudo -n test -s "$ACTIVE" 2>/dev/null \
+        && echo "  (unsaved current — run: nb save <name>)" || true
+}
+
+cli_use() {
+    local name=${1:-}
+    if [[ -z $name ]]; then
+        command -v fzf >/dev/null || { echo "fzf not installed; pass <name>" >&2; exit 1; }
+        switch_profile_ui
+        return
+    fi
+    local src="$PROFILE_DIR/$name.json"
+    [[ -f $src ]] || { echo "no profile: $name" >&2; exit 1; }
+    if [[ "$(current_profile)" == "$name" ]]; then
+        echo "✓ already on $name"
+        return
+    fi
+    apply_profile "$src"
+    echo "✓ switched to $name"
+}
+
+cli_save() {
+    local name=${1:?usage: nb save <name>}
+    save_profile_file "$name"
+    echo "✓ saved $name ($(mgmt_url "$PROFILE_DIR/$name.json"))"
+}
+
+cli_rename() {
+    local old=${1:?usage: nb rename <old> <new>} new=${2:?usage: nb rename <old> <new>}
+    [[ -f "$PROFILE_DIR/$old.json" ]] || { echo "no profile: $old" >&2; exit 1; }
+    [[ -f "$PROFILE_DIR/$new.json" ]] && { echo "exists: $new" >&2; exit 1; }
+    mv "$PROFILE_DIR/$old.json" "$PROFILE_DIR/$new.json"
+    echo "✓ renamed $old → $new"
+}
+
+cli_rm() {
+    local name=${1:?usage: nb rm <name>}
+    rm -f "$PROFILE_DIR/$name.json"
+    echo "✓ removed $name"
+}
+
+cli_logout() {
+    core_logout || { echo "nothing to logout" >&2; exit 1; }
+    echo "✓ logged out (credentials moved to $LAST_LOGOUT)"
+}
+
+# ── TUI main loop ────────────────────────────────────────────────
+tui() {
+    command -v fzf >/dev/null || { echo "nb TUI needs fzf; install: brew install fzf" >&2; exit 1; }
+    start_daemon
+
+    local HERE_ESC; HERE_ESC=$(printf '%s' "$HERE" | sed 's/[&/\]/\\&/g')
+    while :; do
+        local choice
+        choice=$(build_menu \
+            | fzf --reverse --height=100% --delimiter='|' --with-nth=2.. \
+                  --header="nb — netbird control center  (Esc=quit)" \
+                  --preview="cat '$CACHE' 2>/dev/null" \
+                  --preview-window=right:55%:wrap \
+                  --bind="ctrl-r:reload(bash '$HERE/nb-helpers.sh' build_menu)" \
+            | cut -d'|' -f1) || break
+
+        case ${choice:-quit} in
+            connect|login)  sudo netbird up ;;
+            disconnect)     sudo netbird down ;;
+            start_svc)      sudo systemctl start netbird ;;
+            stop_svc)       sudo systemctl stop netbird ;;
+            switch)         switch_profile_ui ;;
+            peers)          peers_ui ;;
+            save)           save_ui ;;
+            logout)         logout_ui ;;
+            quit|"")        break ;;
+        esac
+    done
+}
+
+# ── dispatch ─────────────────────────────────────────────────────
+cmd=${1:-}
+[[ -n $cmd ]] && shift || true
+
+case ${cmd:-} in
+    "")             tui ;;
+    status)         render_status ;;
+    ls)             cli_ls ;;
+    current)        current_profile || { echo "(unsaved)"; exit 1; } ;;
+    save)           cli_save "$@" ;;
+    use)            cli_use "$@" ;;
+    rename)         cli_rename "$@" ;;
+    rm)             cli_rm "$@" ;;
+    up)             sudo netbird up ;;
+    down)           sudo netbird down ;;
+    start)          sudo systemctl start netbird ;;
+    stop)           sudo systemctl stop netbird ;;
+    logout)         cli_logout ;;
+    restore-last)   restore_last ;;
+    -h|--help|help) usage ;;
+    *)              echo "unknown: $cmd" >&2; usage >&2; exit 1 ;;
+esac
