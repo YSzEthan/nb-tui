@@ -45,3 +45,4 @@ jobs:
           name: NetBird-TUI ${{ github.ref_name }}
           files: dist/NetBird-TUI-*
           generate_release_notes: true
+          draft: true
